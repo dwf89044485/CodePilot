@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -72,6 +72,7 @@ function transformApiResponse(raw: Record<string, unknown>, isZh: boolean): Diag
     provider: { en: "Provider/Model", zh: "服务商/模型" },
     features: { en: "Feature Compatibility", zh: "功能兼容性" },
     network: { en: "Network/Endpoint", zh: "网络/端点" },
+    live: { en: "Live Test", zh: "实际连通测试" },
   };
 
   const probes: Probe[] = rawProbes.map((p) => {
@@ -155,18 +156,25 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
   const [expandedProbes, setExpandedProbes] = useState<Set<number>>(new Set());
   const [repairingActions, setRepairingActions] = useState<Set<string>>(new Set());
 
+  const [liveProbeRunning, setLiveProbeRunning] = useState(false);
+  // Monotonic counter to discard stale live probe responses on re-run
+  const diagnosticRunRef = useRef(0);
+
   const fetchDiagnostics = useCallback(async () => {
+    const runId = ++diagnosticRunRef.current;
     setLoading(true);
     setError(null);
     setResult(null);
     setExpandedProbes(new Set());
+    setLiveProbeRunning(false);
     try {
+      // Fast probes first (~1s) — renders immediately
       const res = await fetch("/api/doctor");
       if (!res.ok) throw new Error("Diagnostic request failed");
+      if (runId !== diagnosticRunRef.current) return; // stale
       const raw = await res.json();
       const data = transformApiResponse(raw, isZh);
       setResult(data);
-      // Auto-expand probes that have findings
       const toExpand = new Set<number>();
       data.probes.forEach((probe, i) => {
         if (probe.status !== "pass" && probe.findings.length > 0) {
@@ -174,6 +182,40 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
         }
       });
       setExpandedProbes(toExpand);
+      const fastProbeCount = data.probes.length;
+
+      // Live probe runs separately (up to 15s) — appends when done
+      setLiveProbeRunning(true);
+      fetch("/api/doctor?live=true")
+        .then((r) => r.ok ? r.json() : null)
+        .then((liveRaw) => {
+          // Discard if a newer run started while we were waiting
+          if (runId !== diagnosticRunRef.current) return;
+          if (!liveRaw) return;
+          const liveData = transformApiResponse(liveRaw, isZh);
+          // Live probe is the extra probe beyond the fast probes
+          const liveProbe = liveData.probes.length > fastProbeCount
+            ? liveData.probes[liveData.probes.length - 1]
+            : undefined;
+          if (liveProbe) {
+            setResult((prev) => {
+              if (!prev) return prev;
+              // Don't append if already has a live probe (guard against double-append)
+              if (prev.probes.length > fastProbeCount) return prev;
+              const updated = { ...prev, probes: [...prev.probes, liveProbe] };
+              if (liveProbe.status === "error") updated.overall = "error";
+              else if (liveProbe.status === "warn" && prev.overall === "pass") updated.overall = "warn";
+              return updated;
+            });
+            if (liveProbe.status !== "pass") {
+              setExpandedProbes((prev) => new Set([...prev, fastProbeCount]));
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (runId === diagnosticRunRef.current) setLiveProbeRunning(false);
+        });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -340,6 +382,12 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
                   </div>
                 );
               })}
+              {liveProbeRunning && (
+                <div className="rounded-md border border-border/30 px-3 py-2 flex items-center gap-2 text-xs text-muted-foreground">
+                  <SpinnerGap size={12} className="animate-spin shrink-0" />
+                  {isZh ? "正在运行实际连通性测试..." : "Running live connectivity test..."}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -354,7 +402,7 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
                   : "如果您仍然遇到问题，"}
                 请先点击「导出日志」，然后前往{" "}
                 <a
-                  href="https://github.com/anthropics/claude-code/issues"
+                  href="https://github.com/op7418/CodePilot/issues"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="underline text-foreground hover:no-underline"
@@ -362,6 +410,16 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
                   GitHub Issues
                 </a>
                 {" "}提交问题报告，并附上导出的日志文件。
+                <br />
+                📖 查看{" "}
+                <a
+                  href="https://www.codepilot.sh/zh/docs/providers"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline text-foreground hover:no-underline"
+                >
+                  服务商配置指南
+                </a>
               </>
             ) : (
               <>
@@ -370,7 +428,7 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
                   : "If you're still experiencing problems, "}
                 click &ldquo;Export Logs&rdquo; first, then{" "}
                 <a
-                  href="https://github.com/anthropics/claude-code/issues"
+                  href="https://github.com/op7418/CodePilot/issues"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="underline text-foreground hover:no-underline"
@@ -378,6 +436,16 @@ export function ProviderDoctorDialog({ open, onOpenChange }: ProviderDoctorDialo
                   open a GitHub Issue
                 </a>
                 {" "}and attach the exported log file.
+                <br />
+                📖 See the{" "}
+                <a
+                  href="https://www.codepilot.sh/docs/providers"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline text-foreground hover:no-underline"
+                >
+                  Provider Setup Guide
+                </a>
               </>
             )}
           </div>

@@ -1,6 +1,6 @@
 import os from 'os';
 import { NextResponse } from 'next/server';
-import { runDiagnosis } from '@/lib/provider-doctor';
+import { getLastDiagnosisResult, runDiagnosis, getLastLiveProbeError } from '@/lib/provider-doctor';
 import { getRecentLogs } from '@/lib/runtime-log';
 import { resolveProvider } from '@/lib/provider-resolver';
 
@@ -100,14 +100,16 @@ function sanitizeValue(value: unknown): unknown {
 
 export async function GET() {
   try {
-    // Gather data in parallel
-    const [diagnosis, runtimeLogs] = await Promise.all([
-      runDiagnosis(),
-      getRecentLogs(),
-    ]);
+    // Use cached diagnosis if available (avoid re-running live probe).
+    // Only run fresh diagnosis if Doctor hasn't been opened yet.
+    const diagnosis = getLastDiagnosisResult() ?? await runDiagnosis();
+    const runtimeLogs = getRecentLogs();
 
     // Resolve current provider chain (no raw keys thanks to sanitization)
     const providerResolution = resolveProvider();
+
+    // Capture live probe error (if any) for debugging
+    const liveProbeError = getLastLiveProbeError();
 
     // Build the export package
     const exportPackage = {
@@ -125,6 +127,15 @@ export async function GET() {
         providerName: providerResolution.provider?.name,
         providerType: providerResolution.provider?.provider_type,
       }),
+      liveProbeError: liveProbeError ? sanitizeValue({
+        category: liveProbeError.category,
+        userMessage: liveProbeError.userMessage,
+        actionHint: liveProbeError.actionHint,
+        retryable: liveProbeError.retryable,
+        providerName: liveProbeError.providerName,
+        details: liveProbeError.details,
+        rawMessage: liveProbeError.rawMessage,
+      }) : null,
       exportedAt: new Date().toISOString(),
     };
 

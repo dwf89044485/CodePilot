@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSetting, setSetting, getDb } from '@/lib/db';
 import { findClaudeBinary } from '@/lib/platform';
+import { findCodeBuddyBinary } from '@/lib/platform'; // [CodeBuddy]
+import { getCliRuntime } from '@/lib/cli-runtime'; // [CodeBuddy]
 
 export async function GET() {
   try {
@@ -34,9 +36,35 @@ export async function GET() {
       if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || appToken) {
         provider = 'completed';
       } else {
-        // No real provider found — check if user previously skipped setup
-        const providerSkipped = getSetting('setup_provider_skipped');
-        provider = providerSkipped === 'true' ? 'skipped' : 'not-configured';
+        // Check if Claude Code CLI is available — it acts as a provider via SDK proxy
+        // (the built-in 'env' provider in /api/providers/models always lists Claude Code,
+        // so we must recognise the CLI as a valid provider to keep the UI consistent)
+        try {
+          const binary = findClaudeBinary();
+          if (binary) {
+            provider = 'completed';
+          }
+        } catch {
+          // CLI not found — continue to fallback
+        }
+
+        // [CodeBuddy] Also check CodeBuddy CLI — when runtime is 'codebuddy', it's a valid provider
+        if (provider === 'not-configured') {
+          try {
+            const cbBinary = findCodeBuddyBinary();
+            if (cbBinary) {
+              provider = 'completed';
+            }
+          } catch {
+            // CodeBuddy CLI not found — continue to fallback
+          }
+        }
+
+        if (provider === 'not-configured') {
+          // No real provider found — check if user previously skipped setup
+          const providerSkipped = getSetting('setup_provider_skipped');
+          provider = providerSkipped === 'true' ? 'skipped' : 'not-configured';
+        }
       }
     }
 

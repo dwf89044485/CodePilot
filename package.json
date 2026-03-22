@@ -2,6 +2,7 @@
   "name": "codepilot",
   "version": "0.38.1",
   "private": true,
+  "license": "MIT",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -53,6 +54,7 @@
     "@streamdown/code": "^1.0.1",
     "@streamdown/math": "^1.0.1",
     "@streamdown/mermaid": "^1.0.1",
+    "@tencent-ai/agent-sdk": "^0.3.90",
     "ai": "^6.0.73",
     "ansi-to-react": "^6.2.6",
     "better-sqlite3": "^12.6.2",

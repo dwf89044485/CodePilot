@@ -15,6 +15,8 @@ const ALLOWED_KEYS = [
   'locale',
   'thinking_mode',
   'cli_runtime',
+  'theme_mode',
+  'theme_family',
 ];
 
 export async function GET() {

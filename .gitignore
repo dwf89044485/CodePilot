@@ -15,3 +15,22 @@ next-env.d.ts
 .env
 .env.local
 .env.*.local
+
+# electron
+/dist-electron/
+/release/
+
+# test artifacts
+/playwright-report/
+/test-results/
+
+# user uploads (runtime data)
+.codepilot-uploads/
+
+# monorepo: site app build artifacts
+apps/site/.next/
+apps/site/.source/
+apps/site/node_modules/
+
+# claude code session data
+.claude/

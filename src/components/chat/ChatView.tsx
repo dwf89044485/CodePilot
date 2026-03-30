@@ -6,6 +6,7 @@ import type { Message, MessagesResponse, FileAttachment, SessionStreamSnapshot }
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { ChatComposerActionBar } from './ChatComposerActionBar';
+import { ModeIndicator } from './ModeIndicator';
 import { ChatPermissionSelector } from './ChatPermissionSelector';
 import { ContextUsageIndicator } from './ContextUsageIndicator';
 import { ImageGenToggle } from './ImageGenToggle';
@@ -31,12 +32,12 @@ interface ChatViewProps {
   initialMessages?: Message[];
   initialHasMore?: boolean;
   modelName?: string;
-  initialMode?: string;
   providerId?: string;
   initialPermissionProfile?: 'default' | 'full_access';
+  initialMode?: 'code' | 'plan';
 }
 
-export function ChatView({ sessionId, initialMessages = [], initialHasMore = false, modelName, initialMode, providerId, initialPermissionProfile }: ChatViewProps) {
+export function ChatView({ sessionId, initialMessages = [], initialHasMore = false, modelName, providerId, initialPermissionProfile, initialMode }: ChatViewProps) {
   const { setStreamingSessionId, workingDirectory, setPendingApprovalSessionId } = usePanel();
   const { t } = useTranslation();
   const router = useRouter();
@@ -48,7 +49,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
-  const [mode, setMode] = useState(initialMode || 'code');
+  const [mode, setMode] = useState<string>(initialMode || 'code');
   const [currentModel, setCurrentModel] = useState(() => modelName || (typeof window !== 'undefined' ? localStorage.getItem('codepilot:last-model') : null) || 'sonnet');
   const [currentProviderId, setCurrentProviderId] = useState(() => providerId || (typeof window !== 'undefined' ? localStorage.getItem('codepilot:last-provider-id') : null) || '');
   const [selectedEffort, setSelectedEffort] = useState<string | undefined>(undefined);
@@ -97,7 +98,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
 
   // Pending image generation notices
   const pendingImageNoticesRef = useRef<string[]>([]);
-  const sendMessageRef = useRef<(content: string, files?: FileAttachment[]) => Promise<void>>(undefined);
+  const sendMessageRef = useRef<(content: string, files?: FileAttachment[], systemPromptAppend?: string, displayOverride?: string) => Promise<void>>(undefined);
   const initMetaRef = useRef<{ tools?: unknown; slash_commands?: unknown; skills?: unknown } | null>(null);
 
   const handleModeChange = useCallback((newMode: string) => {
@@ -147,7 +148,6 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
     }
   }, [initialMessages]);
 
-  useEffect(() => { if (initialMode) setMode(initialMode); }, [initialMode]);
   useEffect(() => { setHasMore(initialHasMore); }, [initialHasMore]);
 
   const buildThinkingConfig = useCallback((): { type: string } | undefined => {
@@ -346,6 +346,47 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
     };
   }, []);
 
+  // Listen for widget pin requests from PinnableWidget buttons.
+  // The AI model receives the widget code + instructions and calls the
+  // codepilot_dashboard_pin MCP tool to complete the pin operation.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { widgetCode, title } = (e as CustomEvent).detail || {};
+      if (!widgetCode || !sendMessageRef.current) return;
+
+      const instruction = `请将下面的可视化组件固定到项目看板。\n\n标题建议：${title || 'Untitled'}\n\n组件代码：\n${widgetCode}`;
+      sendMessageRef.current(instruction, undefined, undefined, `📌 固定「${title || 'Widget'}」到看板`);
+    };
+    window.addEventListener('widget-pin-request', handler);
+    return () => window.removeEventListener('widget-pin-request', handler);
+  }, []);
+
+  // Listen for dashboard widget drilldown (click title → conversation)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { title, dataContract } = (e as CustomEvent).detail || {};
+      if (!title || !sendMessageRef.current) return;
+      sendMessageRef.current(
+        `请深入分析看板组件「${title}」的数据。\n数据契约：${dataContract || '无'}`,
+        undefined, undefined,
+        `🔍 分析「${title}」`,
+      );
+    };
+    window.addEventListener('dashboard-widget-drilldown', handler);
+    return () => window.removeEventListener('dashboard-widget-drilldown', handler);
+  }, []);
+
+  // Listen for dashboard command input
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { text } = (e as CustomEvent).detail || {};
+      if (!text || !sendMessageRef.current) return;
+      sendMessageRef.current(text, undefined, undefined, text);
+    };
+    window.addEventListener('dashboard-command', handler);
+    return () => window.removeEventListener('dashboard-command', handler);
+  }, []);
+
   const handleCommand = useChatCommands({ sessionId, messages, setMessages, sendMessage });
 
   // Listen for image generation completion
@@ -438,7 +479,7 @@ export function ChatView({ sessionId, initialMessages = [], initialHasMore = fal
         sdkInitMeta={initMetaRef.current}
       />
       <ChatComposerActionBar
-        left={<ImageGenToggle />}
+        left={<><ModeIndicator mode={mode} onModeChange={handleModeChange} disabled={isStreaming} /><ImageGenToggle /></>}
         center={
           <ChatPermissionSelector
             sessionId={sessionId}

@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { ChannelBinding } from './types';
-import type { SSEEvent, TokenUsage, MessageContentBlock, FileAttachment, MCPServerConfig } from '@/types';
+import type { SSEEvent, TokenUsage, MessageContentBlock, FileAttachment } from '@/types';
 import { streamClaude } from '../claude-client';
 import {
   addMessage,
@@ -26,41 +26,9 @@ import {
   getSetting,
 } from '../db';
 import { resolveProvider as resolveProviderUnified } from '../provider-resolver';
+import { loadCodePilotMcpServers } from '../mcp-loader';
+import { assembleContext } from '../context-assembler';
 import crypto from 'crypto';
-
-/** Read MCP server configs from ~/.claude.json and ~/.claude/settings.json */
-function loadMcpServers(): Record<string, MCPServerConfig> | undefined {
-  try {
-    const readJson = (p: string): Record<string, unknown> => {
-      if (!fs.existsSync(p)) return {};
-      try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return {}; }
-    };
-    const userConfig = readJson(path.join(os.homedir(), '.claude.json'));
-    const settings = readJson(path.join(os.homedir(), '.claude', 'settings.json'));
-    // Also read project-level .mcp.json
-    const projectMcp = readJson(path.join(process.cwd(), '.mcp.json'));
-    const merged = {
-      ...((userConfig.mcpServers || {}) as Record<string, MCPServerConfig>),
-      ...((settings.mcpServers || {}) as Record<string, MCPServerConfig>),
-      ...((projectMcp.mcpServers || {}) as Record<string, MCPServerConfig>),
-    };
-    // Resolve ${...} placeholders in env values against DB settings
-    for (const server of Object.values(merged)) {
-      if (server.env) {
-        for (const [key, value] of Object.entries(server.env)) {
-          if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
-            const settingKey = value.slice(2, -1);
-            const resolved = getSetting(settingKey);
-            server.env[key] = resolved || '';
-          }
-        }
-      }
-    }
-    return Object.keys(merged).length > 0 ? merged : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 export interface PermissionRequestInfo {
   permissionRequestId: string;
@@ -98,6 +66,17 @@ export interface ConversationResult {
   permissionRequests: PermissionRequestInfo[];
   /** SDK session ID captured from status/result events, for session resume */
   sdkSessionId: string | null;
+}
+
+/**
+ * Resolve and validate working directory from multiple candidates.
+ * Returns the first existing directory, or HOME as last resort.
+ */
+function resolveWorkingDirectory(...candidates: (string | undefined | null)[]): string {
+  for (const dir of candidates) {
+    if (dir && fs.existsSync(dir)) return dir;
+  }
+  return os.homedir();
 }
 
 /**
@@ -212,17 +191,42 @@ export async function processMessage(
       }
     }
 
-    // Load MCP servers from Claude config files so the SDK has access to
-    // user-level MCP tools, matching the desktop chat route behavior.
-    const mcpServers = loadMcpServers();
+    // Load only MCP servers needing CodePilot-specific processing (${...} env placeholders).
+    // All other MCP servers are auto-loaded by the SDK via settingSources.
+    const mcpServers = loadCodePilotMcpServers();
+
+    // Unified context assembly — adds CLI tools context (and workspace prompt if applicable)
+    const assembled = await assembleContext({
+      session: session!,
+      entryPoint: 'bridge',
+      userPrompt: text,
+      conversationHistory: historyMsgs,
+    });
+
+    // Resolve a valid working directory from multiple candidates
+    const effectiveCwd = resolveWorkingDirectory(
+      binding.workingDirectory,
+      session?.working_directory,
+      getSetting('bridge_default_work_dir'),
+    );
+
+    // If the effective cwd differs from what the binding/session had, the
+    // original directory is gone — clear sdkSessionId to prevent stale resume.
+    const originalCwd = binding.workingDirectory || session?.working_directory;
+    const cwdChanged = originalCwd && effectiveCwd !== originalCwd;
+    const effectiveSdkSessionId = cwdChanged ? undefined : (binding.sdkSessionId || undefined);
+
+    if (cwdChanged) {
+      console.log(`[conversation-engine] CWD changed from "${originalCwd}" to "${effectiveCwd}", clearing sdkSessionId`);
+    }
 
     const stream = streamClaude({
       prompt: text,
       sessionId,
-      sdkSessionId: binding.sdkSessionId || undefined,
+      sdkSessionId: effectiveSdkSessionId,
       model: effectiveModel,
-      systemPrompt: session?.system_prompt || undefined,
-      workingDirectory: binding.workingDirectory || session?.working_directory || undefined,
+      systemPrompt: assembled.systemPrompt,
+      workingDirectory: effectiveCwd,
       abortController,
       permissionMode,
       provider: resolvedProvider,
@@ -231,6 +235,12 @@ export async function processMessage(
       conversationHistory: historyMsgs,
       files,
       bypassPermissions,
+      // Bridge-specific SDK options
+      thinking: { type: 'disabled' as const },
+      effort: 'medium' as const,
+      generativeUI: false,
+      enableFileCheckpointing: false,
+      context1m: false,
       onRuntimeStatusChange: (status: string) => {
         try { setSessionRuntimeStatus(sessionId, status); } catch { /* best effort */ }
       },
@@ -385,10 +395,17 @@ async function consumeStream(
             break;
           }
 
-          case 'error':
+          case 'error': {
             hasError = true;
-            errorMessage = event.data || 'Unknown error';
+            // Parse structured error JSON to extract a user-friendly message
+            try {
+              const errObj = JSON.parse(event.data);
+              errorMessage = errObj.userMessage || errObj._formattedMessage || errObj.message || event.data;
+            } catch {
+              errorMessage = event.data || 'Unknown error';
+            }
             break;
+          }
 
           case 'result': {
             try {

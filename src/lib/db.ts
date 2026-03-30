@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
-import type { ChatSession, Message, SettingsMap, TaskItem, TaskStatus, ApiProvider, CreateProviderRequest, UpdateProviderRequest, MediaJob, MediaJobStatus, MediaJobItem, MediaJobItemStatus, MediaContextEvent, BatchConfig } from '@/types';
+import type { ChatSession, Message, SettingsMap, TaskItem, TaskStatus, ApiProvider, CreateProviderRequest, UpdateProviderRequest, MediaJob, MediaJobStatus, MediaJobItem, MediaJobItemStatus, MediaContextEvent, BatchConfig, CustomCliTool } from '@/types';
 import type { ChannelType, ChannelBinding } from './bridge/types';
 import { getLocalDateString, localDayStartAsUTC } from './utils';
 
@@ -11,6 +11,42 @@ const dataDir = process.env.CLAUDE_GUI_DATA_DIR || path.join(os.homedir(), '.cod
 const DB_PATH = path.join(dataDir, 'codepilot.db');
 
 let db: Database.Database | null = null;
+
+// File-based lock to prevent concurrent migration from multiple Next.js build workers.
+// Workers will retry for up to 10 seconds before giving up.
+function withMigrationLock(dbInstance: Database.Database, fn: (db: Database.Database) => void): void {
+  const lockPath = DB_PATH + '.migration-lock';
+  const maxWait = 10_000;
+  const start = Date.now();
+
+  while (true) {
+    try {
+      // O_EXCL fails if file already exists — atomic lock acquisition
+      const fd = fs.openSync(lockPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(fd);
+      try {
+        fn(dbInstance);
+      } finally {
+        try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+      }
+      return;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        if (Date.now() - start > maxWait) {
+          // Lock held too long — stale lock, force remove and retry once
+          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+          continue;
+        }
+        // Wait a bit and retry
+        const waitMs = 50 + Math.random() * 100;
+        const waitUntil = Date.now() + waitMs;
+        while (Date.now() < waitUntil) { /* busy wait — better-sqlite3 is sync */ }
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 export function getDb(): Database.Database {
   if (!db) {
@@ -51,8 +87,9 @@ export function getDb(): Database.Database {
 
     db = new Database(DB_PATH);
     db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
     db.pragma('foreign_keys = ON');
-    initDb(db);
+    withMigrationLock(db, initDb);
   }
   return db;
 }
@@ -281,21 +318,31 @@ function initDb(db: Database.Database): void {
   migrateDb(db);
 }
 
+/** Safely add a column — ignores "duplicate column name" errors from concurrent workers. */
+function safeAddColumn(db: Database.Database, sql: string): void {
+  try {
+    db.exec(sql);
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes('duplicate column name')) return;
+    throw err;
+  }
+}
+
 function migrateDb(db: Database.Database): void {
   const columns = db.prepare("PRAGMA table_info(chat_sessions)").all() as { name: string }[];
   const colNames = columns.map(c => c.name);
 
   if (!colNames.includes('model')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('system_prompt')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('sdk_session_id')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN sdk_session_id TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN sdk_session_id TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('project_name')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN project_name TEXT NOT NULL DEFAULT ''");
     // Backfill project_name from working_directory for existing rows
     db.exec(`
       UPDATE chat_sessions
@@ -307,33 +354,33 @@ function migrateDb(db: Database.Database): void {
     `);
   }
   if (!colNames.includes('status')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
   }
   if (!colNames.includes('mode')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'code'");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'code'");
   }
   if (!colNames.includes('provider_name')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN provider_name TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN provider_name TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('provider_id')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('sdk_cwd')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN sdk_cwd TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN sdk_cwd TEXT NOT NULL DEFAULT ''");
     // Backfill sdk_cwd from working_directory for existing sessions
     db.exec("UPDATE chat_sessions SET sdk_cwd = working_directory WHERE sdk_cwd = '' AND working_directory != ''");
   }
   if (!colNames.includes('runtime_status')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN runtime_status TEXT NOT NULL DEFAULT 'idle'");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN runtime_status TEXT NOT NULL DEFAULT 'idle'");
   }
   if (!colNames.includes('runtime_updated_at')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN runtime_updated_at TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN runtime_updated_at TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('runtime_error')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN runtime_error TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN runtime_error TEXT NOT NULL DEFAULT ''");
   }
   if (!colNames.includes('permission_profile')) {
-    db.exec("ALTER TABLE chat_sessions ADD COLUMN permission_profile TEXT NOT NULL DEFAULT 'default'");
+    safeAddColumn(db, "ALTER TABLE chat_sessions ADD COLUMN permission_profile TEXT NOT NULL DEFAULT 'default'");
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_runtime_status ON chat_sessions(runtime_status)");
 
@@ -352,7 +399,7 @@ function migrateDb(db: Database.Database): void {
   const msgColNames = msgColumns.map(c => c.name);
 
   if (!msgColNames.includes('token_usage')) {
-    db.exec("ALTER TABLE messages ADD COLUMN token_usage TEXT");
+    safeAddColumn(db, "ALTER TABLE messages ADD COLUMN token_usage TEXT");
   }
 
   // Ensure tasks table exists for databases created before this migration
@@ -374,10 +421,10 @@ function migrateDb(db: Database.Database): void {
   const taskColumns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
   const taskColNames = taskColumns.map(c => c.name);
   if (!taskColNames.includes('source')) {
-    db.exec("ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'user'");
+    safeAddColumn(db, "ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'user'");
   }
   if (!taskColNames.includes('sort_order')) {
-    db.exec("ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
+    safeAddColumn(db, "ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
   }
 
   // Ensure api_providers table exists for databases created before this migration
@@ -402,19 +449,19 @@ function migrateDb(db: Database.Database): void {
     const providerCols = db.prepare("PRAGMA table_info(api_providers)").all() as { name: string }[];
     const provColNames = providerCols.map(c => c.name);
     if (!provColNames.includes('protocol')) {
-      db.exec("ALTER TABLE api_providers ADD COLUMN protocol TEXT NOT NULL DEFAULT ''");
+      safeAddColumn(db, "ALTER TABLE api_providers ADD COLUMN protocol TEXT NOT NULL DEFAULT ''");
     }
     if (!provColNames.includes('headers_json')) {
-      db.exec("ALTER TABLE api_providers ADD COLUMN headers_json TEXT NOT NULL DEFAULT '{}'");
+      safeAddColumn(db, "ALTER TABLE api_providers ADD COLUMN headers_json TEXT NOT NULL DEFAULT '{}'");
     }
     if (!provColNames.includes('env_overrides_json')) {
-      db.exec("ALTER TABLE api_providers ADD COLUMN env_overrides_json TEXT NOT NULL DEFAULT ''");
+      safeAddColumn(db, "ALTER TABLE api_providers ADD COLUMN env_overrides_json TEXT NOT NULL DEFAULT ''");
     }
     if (!provColNames.includes('role_models_json')) {
-      db.exec("ALTER TABLE api_providers ADD COLUMN role_models_json TEXT NOT NULL DEFAULT '{}'");
+      safeAddColumn(db, "ALTER TABLE api_providers ADD COLUMN role_models_json TEXT NOT NULL DEFAULT '{}'");
     }
     if (!provColNames.includes('options_json')) {
-      db.exec("ALTER TABLE api_providers ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'");
+      safeAddColumn(db, "ALTER TABLE api_providers ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'");
     }
   }
 
@@ -534,7 +581,7 @@ function migrateDb(db: Database.Database): void {
 
   // Add favorited column to media_generations if missing
   try {
-    db.exec("ALTER TABLE media_generations ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0");
+    safeAddColumn(db, "ALTER TABLE media_generations ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0");
   } catch {
     // Column already exists
   }
@@ -693,13 +740,13 @@ function migrateDb(db: Database.Database): void {
   const permLinkCols = db.prepare("PRAGMA table_info(channel_permission_links)").all() as { name: string }[];
   const permLinkColNames = permLinkCols.map(c => c.name);
   if (permLinkColNames.length > 0 && !permLinkColNames.includes('tool_name')) {
-    db.exec("ALTER TABLE channel_permission_links ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE channel_permission_links ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''");
   }
   if (permLinkColNames.length > 0 && !permLinkColNames.includes('suggestions')) {
-    db.exec("ALTER TABLE channel_permission_links ADD COLUMN suggestions TEXT NOT NULL DEFAULT ''");
+    safeAddColumn(db, "ALTER TABLE channel_permission_links ADD COLUMN suggestions TEXT NOT NULL DEFAULT ''");
   }
   if (permLinkColNames.length > 0 && !permLinkColNames.includes('resolved')) {
-    db.exec("ALTER TABLE channel_permission_links ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0");
+    safeAddColumn(db, "ALTER TABLE channel_permission_links ADD COLUMN resolved INTEGER NOT NULL DEFAULT 0");
   }
 
   // Channel configs table (structured config for channel plugins)
@@ -714,6 +761,104 @@ function migrateDb(db: Database.Database): void {
       UNIQUE(channel_type, account_id)
     );
   `);
+
+  // WeChat: bot accounts for multi-account support
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS weixin_accounts (
+      account_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL DEFAULT '',
+      base_url TEXT NOT NULL DEFAULT '',
+      cdn_base_url TEXT NOT NULL DEFAULT '',
+      token TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_login_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // WeChat: per-peer context token persistence
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS weixin_context_tokens (
+      account_id TEXT NOT NULL,
+      peer_user_id TEXT NOT NULL,
+      context_token TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(account_id, peer_user_id)
+    );
+  `);
+
+  // CLI tools: user-added custom tools
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cli_tools_custom (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      bin_path TEXT NOT NULL,
+      bin_name TEXT NOT NULL DEFAULT '',
+      version TEXT,
+      install_method TEXT NOT NULL DEFAULT 'unknown',
+      install_package TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // CLI tools: persisted AI-generated descriptions
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cli_tool_descriptions (
+      tool_id TEXT PRIMARY KEY,
+      description_zh TEXT NOT NULL DEFAULT '',
+      description_en TEXT NOT NULL DEFAULT '',
+      structured_json TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Migration: add structured_json column if missing
+  {
+    const descCols = db.prepare("PRAGMA table_info(cli_tool_descriptions)").all() as { name: string }[];
+    if (!descCols.some(c => c.name === 'structured_json')) {
+      safeAddColumn(db, "ALTER TABLE cli_tool_descriptions ADD COLUMN structured_json TEXT NOT NULL DEFAULT ''");
+    }
+  }
+
+  // Migration: add install_method column to cli_tools_custom
+  {
+    const customCols = db.prepare("PRAGMA table_info(cli_tools_custom)").all() as { name: string }[];
+    if (!customCols.some(c => c.name === 'install_method')) {
+      safeAddColumn(db, "ALTER TABLE cli_tools_custom ADD COLUMN install_method TEXT NOT NULL DEFAULT 'unknown'");
+    }
+    if (!customCols.some(c => c.name === 'install_package')) {
+      safeAddColumn(db, "ALTER TABLE cli_tools_custom ADD COLUMN install_package TEXT NOT NULL DEFAULT ''");
+    }
+  }
+
+  // Migration: remove explicitly openai-compatible providers (SDK does not support them)
+  // and backfill empty protocol for legacy custom providers using URL-based inference.
+  try {
+    const providerCols = db.prepare("PRAGMA table_info(api_providers)").all() as { name: string }[];
+    if (providerCols.some(c => c.name === 'protocol')) {
+      db.exec("DELETE FROM api_providers WHERE protocol = 'openai-compatible'");
+
+      // Backfill empty protocol for legacy custom providers — infer from base_url.
+      // These are valid Anthropic-compatible providers (GLM, Kimi, MiniMax, etc.)
+      // that were created before the protocol column existed.
+      const legacyCustom = db.prepare(
+        "SELECT id, base_url FROM api_providers WHERE provider_type = 'custom' AND (protocol = '' OR protocol IS NULL)"
+      ).all() as { id: string; base_url: string }[];
+      if (legacyCustom.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- dynamic require to avoid circular import at module load
+        const { inferProtocolFromLegacy } = require('./provider-catalog');
+        const updateStmt = db.prepare("UPDATE api_providers SET protocol = ? WHERE id = ?");
+        for (const row of legacyCustom) {
+          const protocol = inferProtocolFromLegacy('custom', row.base_url || '');
+          updateStmt.run(protocol, row.id);
+        }
+      }
+    }
+  } catch { /* table may not exist yet */ }
 }
 
 // ==========================================
@@ -828,7 +973,8 @@ export function setDefaultProviderId(id: string): void {
 export function updateSessionWorkingDirectory(id: string, workingDirectory: string): void {
   const db = getDb();
   const projectName = path.basename(workingDirectory);
-  db.prepare('UPDATE chat_sessions SET working_directory = ?, project_name = ? WHERE id = ?').run(workingDirectory, projectName, id);
+  // Sync sdk_cwd + clear sdk_session_id — old session context is invalid
+  db.prepare('UPDATE chat_sessions SET working_directory = ?, sdk_cwd = ?, project_name = ?, sdk_session_id = ? WHERE id = ?').run(workingDirectory, workingDirectory, projectName, '', id);
 }
 
 export function updateSessionMode(id: string, mode: string): void {
@@ -2137,6 +2283,243 @@ export function markPermissionLinkResolved(permissionRequestId: string): boolean
     'UPDATE channel_permission_links SET resolved = 1 WHERE permission_request_id = ? AND resolved = 0'
   ).run(permissionRequestId);
   return result.changes > 0;
+}
+
+// ==========================================
+// WeChat Account Operations
+// ==========================================
+
+export interface WeixinAccountRow {
+  account_id: string;
+  user_id: string;
+  base_url: string;
+  cdn_base_url: string;
+  token: string;
+  name: string;
+  enabled: number;
+  last_login_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listWeixinAccounts(): WeixinAccountRow[] {
+  const db = getDb();
+  return db.prepare('SELECT * FROM weixin_accounts ORDER BY created_at DESC').all() as WeixinAccountRow[];
+}
+
+export function getWeixinAccount(accountId: string): WeixinAccountRow | undefined {
+  const db = getDb();
+  return db.prepare('SELECT * FROM weixin_accounts WHERE account_id = ?').get(accountId) as WeixinAccountRow | undefined;
+}
+
+export function upsertWeixinAccount(params: {
+  accountId: string;
+  userId?: string;
+  baseUrl?: string;
+  cdnBaseUrl?: string;
+  token?: string;
+  name?: string;
+  enabled?: boolean;
+}): void {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+  db.prepare(`
+    INSERT INTO weixin_accounts (account_id, user_id, base_url, cdn_base_url, token, name, enabled, last_login_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(account_id) DO UPDATE SET
+      user_id = COALESCE(excluded.user_id, weixin_accounts.user_id),
+      base_url = COALESCE(excluded.base_url, weixin_accounts.base_url),
+      cdn_base_url = COALESCE(excluded.cdn_base_url, weixin_accounts.cdn_base_url),
+      token = COALESCE(excluded.token, weixin_accounts.token),
+      name = COALESCE(excluded.name, weixin_accounts.name),
+      enabled = excluded.enabled,
+      last_login_at = excluded.last_login_at,
+      updated_at = excluded.updated_at
+  `).run(
+    params.accountId,
+    params.userId || '',
+    params.baseUrl || '',
+    params.cdnBaseUrl || '',
+    params.token || '',
+    params.name || '',
+    params.enabled !== false ? 1 : 0,
+    now,
+    now,
+    now,
+  );
+}
+
+export function deleteWeixinAccount(accountId: string): boolean {
+  const db = getDb();
+  // Also clean up context tokens and offsets
+  db.prepare('DELETE FROM weixin_context_tokens WHERE account_id = ?').run(accountId);
+  db.prepare('DELETE FROM channel_offsets WHERE channel_type = ?').run(`weixin:${accountId}`);
+  const result = db.prepare('DELETE FROM weixin_accounts WHERE account_id = ?').run(accountId);
+  return result.changes > 0;
+}
+
+export function setWeixinAccountEnabled(accountId: string, enabled: boolean): void {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+  db.prepare(
+    'UPDATE weixin_accounts SET enabled = ?, updated_at = ? WHERE account_id = ?'
+  ).run(enabled ? 1 : 0, now, accountId);
+}
+
+export function getWeixinContextToken(accountId: string, peerUserId: string): string | undefined {
+  const db = getDb();
+  const row = db.prepare(
+    'SELECT context_token FROM weixin_context_tokens WHERE account_id = ? AND peer_user_id = ?'
+  ).get(accountId, peerUserId) as { context_token: string } | undefined;
+  return row?.context_token;
+}
+
+export function upsertWeixinContextToken(accountId: string, peerUserId: string, contextToken: string): void {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+  db.prepare(`
+    INSERT INTO weixin_context_tokens (account_id, peer_user_id, context_token, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(account_id, peer_user_id) DO UPDATE SET
+      context_token = excluded.context_token,
+      updated_at = excluded.updated_at
+  `).run(accountId, peerUserId, contextToken, now);
+}
+
+export function deleteWeixinContextTokensByAccount(accountId: string): void {
+  const db = getDb();
+  db.prepare('DELETE FROM weixin_context_tokens WHERE account_id = ?').run(accountId);
+}
+
+// ==========================================
+// CLI Tools — Custom Tools
+// ==========================================
+
+export function getAllCustomCliTools(): CustomCliTool[] {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM cli_tools_custom WHERE enabled = 1 ORDER BY created_at DESC').all() as Array<{
+    id: string; name: string; bin_path: string; bin_name: string; version: string | null;
+    install_method: string; install_package: string; enabled: number; created_at: string; updated_at: string;
+  }>;
+  return rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    binPath: r.bin_path,
+    binName: r.bin_name,
+    version: r.version,
+    installMethod: r.install_method,
+    installPackage: r.install_package,
+    enabled: r.enabled === 1,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+export function getCustomCliTool(id: string): CustomCliTool | undefined {
+  const db = getDb();
+  const r = db.prepare('SELECT * FROM cli_tools_custom WHERE id = ?').get(id) as {
+    id: string; name: string; bin_path: string; bin_name: string; version: string | null;
+    install_method: string; install_package: string; enabled: number; created_at: string; updated_at: string;
+  } | undefined;
+  if (!r) return undefined;
+  return {
+    id: r.id, name: r.name, binPath: r.bin_path, binName: r.bin_name,
+    version: r.version, installMethod: r.install_method, installPackage: r.install_package,
+    enabled: r.enabled === 1, createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+
+export function createCustomCliTool(params: { name: string; binPath: string; binName: string; version?: string | null; installMethod?: string; installPackage?: string }): CustomCliTool {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+
+  // Idempotency: if a tool with the same bin_path already exists, update and return it
+  const existing = db.prepare('SELECT id FROM cli_tools_custom WHERE bin_path = ?').get(params.binPath) as { id: string } | undefined;
+  if (existing) {
+    const method = params.installMethod || 'unknown';
+    const pkg = params.installPackage || '';
+    db.prepare(`
+      UPDATE cli_tools_custom SET name = ?,  version = ?,
+        install_method = CASE WHEN ? != 'unknown' THEN ? ELSE install_method END,
+        install_package = CASE WHEN ? != '' THEN ? ELSE install_package END,
+        updated_at = ? WHERE id = ?
+    `).run(params.name, params.version ?? null, method, method, pkg, pkg, now, existing.id);
+    return getCustomCliTool(existing.id)!;
+  }
+
+  const baseId = `custom-${params.binName}`;
+
+  // Handle id collisions
+  let id = baseId;
+  let counter = 2;
+  while (db.prepare('SELECT id FROM cli_tools_custom WHERE id = ?').get(id)) {
+    id = `${baseId}-${counter++}`;
+  }
+
+  db.prepare(
+    'INSERT INTO cli_tools_custom (id, name, bin_path, bin_name, version, install_method, install_package, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(id, params.name, params.binPath, params.binName, params.version ?? null, params.installMethod || 'unknown', params.installPackage || '', now, now);
+
+  return getCustomCliTool(id)!;
+}
+
+export function deleteCustomCliTool(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM cli_tools_custom WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+// ==========================================
+// CLI Tools — Descriptions
+// ==========================================
+
+export function getAllCliToolDescriptions(): Record<string, { zh: string; en: string; structured?: unknown }> {
+  const db = getDb();
+  const rows = db.prepare('SELECT tool_id, description_zh, description_en, structured_json FROM cli_tool_descriptions').all() as Array<{
+    tool_id: string; description_zh: string; description_en: string; structured_json: string;
+  }>;
+  const result: Record<string, { zh: string; en: string; structured?: unknown }> = {};
+  for (const r of rows) {
+    let structured: unknown = undefined;
+    if (r.structured_json) {
+      try { structured = JSON.parse(r.structured_json); } catch { /* ignore */ }
+    }
+    result[r.tool_id] = { zh: r.description_zh, en: r.description_en, ...(structured ? { structured } : {}) };
+  }
+  return result;
+}
+
+export function upsertCliToolDescription(toolId: string, zh: string, en: string, structuredJson?: string): void {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+  db.prepare(`
+    INSERT INTO cli_tool_descriptions (tool_id, description_zh, description_en, structured_json, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(tool_id) DO UPDATE SET
+      description_zh = excluded.description_zh,
+      description_en = excluded.description_en,
+      structured_json = excluded.structured_json,
+      updated_at = excluded.updated_at
+  `).run(toolId, zh, en, structuredJson || '', now);
+}
+
+export function bulkUpsertCliToolDescriptions(entries: Array<{ toolId: string; zh: string; en: string }>): void {
+  const db = getDb();
+  const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+  const stmt = db.prepare(`
+    INSERT INTO cli_tool_descriptions (tool_id, description_zh, description_en, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(tool_id) DO UPDATE SET
+      description_zh = excluded.description_zh,
+      description_en = excluded.description_en,
+      updated_at = excluded.updated_at
+  `);
+  const tx = db.transaction((items: typeof entries) => {
+    for (const e of items) {
+      stmt.run(e.toolId, e.zh, e.en, now);
+    }
+  });
+  tx(entries);
 }
 
 // ==========================================

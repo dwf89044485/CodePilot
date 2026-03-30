@@ -95,6 +95,26 @@ export function McpManager() {
     setEditorOpen(true);
   }
 
+  const handlePersistentToggle = useCallback(async (name: string, enabled: boolean) => {
+    const updated = { ...servers };
+    updated[name] = { ...updated[name], enabled };
+    setServers(updated);
+    try {
+      const res = await fetch('/api/plugins/mcp', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mcpServers: updated }),
+      });
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+    } catch (err) {
+      console.error('Failed to toggle MCP server:', err);
+      // Revert on failure
+      fetchServers();
+    }
+  }, [servers, fetchServers]);
+
   async function handleDelete(name: string) {
     try {
       const res = await fetch(`/api/plugins/mcp/${encodeURIComponent(name)}`, {
@@ -196,26 +216,32 @@ export function McpManager() {
   const serverCount = Object.keys(servers).length;
 
   return (
-    <div className="h-full overflow-auto">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold">{t('extensions.mcpServers')}</h3>
-            {serverCount > 0 && (
-              <span className="text-sm text-muted-foreground">
-                ({serverCount})
-              </span>
-            )}
+    <div className="flex h-full flex-col">
+      {/* Fixed header */}
+      <div className="shrink-0 border-b border-border/50 px-6 pt-4 pb-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold">
+              {t('extensions.mcpServers')}
+              {serverCount > 0 && (
+                <span className="text-sm font-normal text-muted-foreground ml-2">
+                  ({serverCount})
+                </span>
+              )}
+            </h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              {t('mcp.managerDesc' as TranslationKey)}
+            </p>
           </div>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Configure Model Context Protocol servers for Claude
-          </p>
+          <Button size="sm" className="gap-1" onClick={handleAdd}>
+            <Plus size={14} />
+            {t('mcp.addServer')}
+          </Button>
         </div>
-        <Button size="sm" className="gap-1" onClick={handleAdd}>
-          <Plus size={14} />
-          {t('mcp.addServer')}
-        </Button>
       </div>
+
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto p-6">
 
       {error && (
         <div className="rounded-md bg-destructive/10 p-3 mb-4">
@@ -246,6 +272,7 @@ export function McpManager() {
               servers={servers}
               onEdit={handleEdit}
               onDelete={handleDelete}
+              onToggleEnabled={handlePersistentToggle}
               runtimeStatus={runtimeStatus}
               activeSessionId={activeSessionId || undefined}
             />
@@ -335,6 +362,7 @@ export function McpManager() {
         server={editingServer}
         onSave={handleSave}
       />
+      </div>
     </div>
   );
 }

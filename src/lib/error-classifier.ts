@@ -302,6 +302,12 @@ export function classifyError(ctx: ErrorContext): ClassifiedError {
     });
 
     if (matched) {
+      // CodeBuddy SDK has its own auth mechanism and should not show
+      // Claude-style credential guidance (ANTHROPIC_API_KEY/provider settings).
+      if (pattern.category === 'NO_CREDENTIALS' && ctx.providerName === 'CodeBuddy SDK') {
+        continue;
+      }
+
       // Refinement: if matched as PROCESS_CRASH but stderr contains
       // session-related keywords, reclassify as SESSION_STATE_ERROR
       // to avoid misleading "check API Key / Base URL" prompts.

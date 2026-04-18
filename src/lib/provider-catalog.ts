@@ -642,6 +642,65 @@ export const VENDOR_PRESETS: VendorPreset[] = [
     },
   },
 
+  // ── [CodeBuddy] CodeBuddy SDK ──
+  {
+    key: 'codebuddy',
+    name: 'CodeBuddy',
+    description: 'Tencent CodeBuddy — multi-model local agent via CLI',
+    descriptionZh: '腾讯 CodeBuddy — 多模型本地智能体（CLI）',
+    protocol: 'anthropic',
+    authStyle: 'env_only',
+    baseUrl: '',
+    defaultEnvOverrides: {},
+    defaultModels: [
+      // Claude
+      { modelId: 'claude-sonnet-4.6', displayName: 'Claude Sonnet 4.6', role: 'default' },
+      { modelId: 'claude-sonnet-4.6-1m', displayName: 'Claude Sonnet 4.6 (1M)' },
+      { modelId: 'claude-opus-4.6', displayName: 'Claude Opus 4.6', role: 'opus' },
+      { modelId: 'claude-opus-4.6-1m', displayName: 'Claude Opus 4.6 (1M)' },
+      { modelId: 'claude-haiku-4.5', displayName: 'Claude Haiku 4.5', role: 'haiku' },
+      { modelId: 'claude-4.5', displayName: 'Claude Sonnet 4.5' },
+      { modelId: 'claude-opus-4.5', displayName: 'Claude Opus 4.5' },
+      // GPT
+      { modelId: 'gpt-5.4', displayName: 'GPT-5.4' },
+      { modelId: 'gpt-5.3-codex', displayName: 'GPT-5.3-Codex' },
+      { modelId: 'gpt-5.2', displayName: 'GPT-5.2' },
+      { modelId: 'gpt-5.2-codex', displayName: 'GPT-5.2-Codex' },
+      { modelId: 'gpt-5.1', displayName: 'GPT-5.1' },
+      { modelId: 'gpt-5.1-codex', displayName: 'GPT-5.1-Codex' },
+      { modelId: 'gpt-5.1-codex-max', displayName: 'GPT-5.1-Codex-Max' },
+      { modelId: 'gpt-5.1-codex-mini', displayName: 'GPT-5.1-Codex-Mini' },
+      // Gemini
+      { modelId: 'gemini-3.1-pro', displayName: 'Gemini-3.1-Pro' },
+      { modelId: 'gemini-3.0-flash', displayName: 'Gemini-3.0-Flash' },
+      { modelId: 'gemini-2.5-pro', displayName: 'Gemini-2.5-Pro' },
+      { modelId: 'gemini-3.1-flash-lite', displayName: 'Gemini-3.1-Flash-Lite' },
+      // GLM (IOA)
+      { modelId: 'glm-5.1-ioa', displayName: 'GLM-5.1' },
+      { modelId: 'glm-5.0-turbo-ioa', displayName: 'GLM-5.0-Turbo' },
+      { modelId: 'glm-5v-turbo-ioa', displayName: 'GLM-5V-Turbo' },
+      { modelId: 'glm-5.0-ioa', displayName: 'GLM-5.0' },
+      { modelId: 'glm-4.7-ioa', displayName: 'GLM-4.7' },
+      // MiniMax (IOA)
+      { modelId: 'minimax-m2.7-ioa', displayName: 'MiniMax-M2.7' },
+      { modelId: 'minimax-m2.5-ioa', displayName: 'MiniMax-M2.5' },
+      // Kimi (IOA)
+      { modelId: 'kimi-k2.5-ioa', displayName: 'Kimi-K2.5' },
+      // DeepSeek (IOA)
+      { modelId: 'deepseek-v3-2-volc-ioa', displayName: 'DeepSeek-V3.2' },
+      // Hunyuan (IOA)
+      { modelId: 'hunyuan-2.0-thinking-ioa', displayName: 'Hunyuan-2.0-Thinking' },
+    ],
+    fields: [],
+    iconKey: 'codebuddy',
+    sdkProxyOnly: true,
+    meta: {
+      docsUrl: 'https://codebuddy.tencent.com',
+      billingModel: 'free',
+      notes: ['需要本地安装 CodeBuddy CLI 并登录'],
+    },
+  },
+
 ];
 
 // ── Runtime preset validation (fails fast on invalid presets) ───
@@ -753,6 +812,7 @@ export function findPresetForLegacy(baseUrl: string, providerType: string, proto
   if (providerType === 'vertex') return VENDOR_PRESETS.find(p => p.key === 'vertex');
   if (providerType === 'openrouter') return VENDOR_PRESETS.find(p => p.key === 'openrouter');
   if (providerType === 'gemini-image') return VENDOR_PRESETS.find(p => p.key === 'gemini-image');
+  if (providerType === 'codebuddy') return VENDOR_PRESETS.find(p => p.key === 'codebuddy'); // [CodeBuddy]
   if (providerType === 'anthropic' && baseUrl === 'https://api.anthropic.com') {
     return VENDOR_PRESETS.find(p => p.key === 'anthropic-official');
   }
@@ -768,6 +828,7 @@ export function findPresetForLegacy(baseUrl: string, providerType: string, proto
 export function getDefaultModelsForProvider(
   protocol: Protocol,
   baseUrl: string,
+  providerType?: string,
 ): CatalogModel[] {
   // Try to find a preset by exact base_url
   const preset = VENDOR_PRESETS.find(p => p.baseUrl && p.baseUrl === baseUrl);
@@ -791,6 +852,12 @@ export function getDefaultModelsForProvider(
       } catch { return false; }
     });
     if (fuzzy) return fuzzy.defaultModels;
+  }
+
+  // [CodeBuddy] Type-based lookup for presets with empty baseUrl (e.g. codebuddy, bedrock, vertex)
+  if (providerType) {
+    const typePreset = VENDOR_PRESETS.find(p => p.key === providerType);
+    if (typePreset) return typePreset.defaultModels;
   }
 
   // Protocol-based defaults (only when no preset matched)

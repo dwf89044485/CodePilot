@@ -1420,6 +1420,10 @@ const zh: Record<TranslationKey, string> = {
   'buddy.namePlaceholder': '给你的伙伴起个名字...',
   'buddy.nameHint': '这将是你的伙伴的名字',
   'buddy.reset': '重置伙伴',
+  // [CodeBuddy] 运行时和服务商标签
+  'provider.cbSdkDesc': '通过本地已登录的 CodeBuddy CLI 提供模型服务',
+  'connection.cbNotInstalled': 'CodeBuddy CLI 未安装或不在 PATH 中。',
+  'connection.cbInstallTitle': '安装 CodeBuddy',
 };
 
 export default zh;

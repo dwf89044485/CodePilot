@@ -427,9 +427,23 @@ export function streamClaude(options: ClaudeStreamOptions): ReadableStream<strin
   // Non-Anthropic providers (OpenAI OAuth, etc.) MUST use Native Runtime
   // because Claude Code SDK only supports Anthropic models.
   const isNonAnthropicProvider = effectiveProvider === 'openai-oauth';
+  // [CodeBuddy] CodeBuddy provider uses its own SDK runtime.
+  // Check provider_type from DB since effectiveProvider is a UUID, not 'codebuddy'.
+  let isCodeBuddyProvider = false;
+  if (effectiveProvider && effectiveProvider !== 'env' && effectiveProvider !== 'openai-oauth') {
+    try {
+      const { getProvider: getProviderRecord } = require('./db') as typeof import('./db');
+      const provRecord = getProviderRecord(effectiveProvider);
+      if (provRecord?.provider_type === 'codebuddy') {
+        isCodeBuddyProvider = true;
+      }
+    } catch { /* ignore */ }
+  }
 
   if (isNonAnthropicProvider) {
     runtime = getRuntime('native');
+  } else if (isCodeBuddyProvider) {
+    runtime = getRuntime('codebuddy'); // [CodeBuddy]
   } else if (!cliDisabled) {
     // Only attempt transport-based SDK forcing when CLI is enabled
     try {

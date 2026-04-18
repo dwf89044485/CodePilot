@@ -1423,6 +1423,10 @@ const en = {
   'buddy.namePlaceholder': 'Give your buddy a name...',
   'buddy.nameHint': 'This will be your buddy\'s name',
   'buddy.reset': 'Reset buddy',
+  // [CodeBuddy] Runtime and provider labels
+  'provider.cbSdkDesc': 'Models powered by locally authenticated CodeBuddy CLI',
+  'connection.cbNotInstalled': 'CodeBuddy CLI is not installed or not available in PATH.',
+  'connection.cbInstallTitle': 'Install CodeBuddy',
 } as const;
 
 export type TranslationKey = keyof typeof en;

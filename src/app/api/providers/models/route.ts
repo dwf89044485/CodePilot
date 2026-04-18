@@ -138,7 +138,7 @@ export async function GET() {
       } catch { /* table may not exist in old DBs */ }
 
       // 2) Catalog defaults
-      const catalogModels = getDefaultModelsForProvider(protocol, provider.base_url);
+      const catalogModels = getDefaultModelsForProvider(protocol, provider.base_url, provider.provider_type);
       const catalogRaw = catalogModels.map(m => ({
         value: m.modelId,
         label: m.displayName,

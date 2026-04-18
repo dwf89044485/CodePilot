@@ -84,6 +84,15 @@ export function predictNativeRuntime(providerId?: string): boolean {
   // Non-Anthropic providers always force native
   if (providerId === 'openai-oauth') return true;
 
+  // [CodeBuddy] Check provider_type from DB — CodeBuddy has its own runtime, not native
+  if (providerId && providerId !== 'env') {
+    try {
+      const { getProvider: getProviderRecord } = require('../db') as typeof import('../db');
+      const provRecord = getProviderRecord(providerId);
+      if (provRecord?.provider_type === 'codebuddy') return false;
+    } catch { /* ignore */ }
+  }
+
   // cli_enabled=false → always native
   if (getSetting('cli_enabled') === 'false') return true;
 

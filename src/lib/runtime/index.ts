@@ -11,7 +11,9 @@ export { registerRuntime, getRuntime, getAllRuntimes, getAvailableRuntimes, reso
 import { registerRuntime } from './registry';
 import { nativeRuntime } from './native-runtime';
 import { sdkRuntime } from './sdk-runtime';
+import { codebuddyRuntime } from './codebuddy-runtime'; // [CodeBuddy]
 
 // Register built-in runtimes
 registerRuntime(nativeRuntime);
 registerRuntime(sdkRuntime);
+registerRuntime(codebuddyRuntime); // [CodeBuddy]

@@ -45,6 +45,7 @@ export function getProviderIcon(name: string, baseUrl: string): ReactNode {
   if (lower.includes("vertex") || lower.includes("google")) return <Google size={18} />;
   if (lower.includes("aws")) return <Aws size={18} />;
   if (lower.includes("anthropic") || url.includes("anthropic")) return <Anthropic size={18} />;
+  if (lower.includes("codebuddy")) return <HardDrives size={18} className="text-primary" />; // [CodeBuddy]
 
   return <HardDrives size={18} className="text-muted-foreground" />;
 }
@@ -87,6 +88,7 @@ function resolveIcon(iconKey: string): ReactNode {
     'xiaomi-mimo': <XiaomiMiMo size={18} />,
     ollama: <Ollama size={18} />,
     server: <HardDrives size={18} className="text-muted-foreground" />,
+    codebuddy: <HardDrives size={18} className="text-primary" />, // [CodeBuddy]
   };
   return ICON_MAP[iconKey] || <HardDrives size={18} className="text-muted-foreground" />;
 }
@@ -103,6 +105,7 @@ function toQuickPreset(vp: VendorPreset): QuickPreset {
       : vp.protocol === 'bedrock' ? 'bedrock'
       : vp.protocol === 'vertex' ? 'vertex'
       : vp.protocol === 'gemini-image' ? 'gemini-image'
+      : vp.key === 'codebuddy' ? 'codebuddy' // [CodeBuddy]
       : 'anthropic',
     protocol: vp.protocol,
     authStyle: vp.authStyle,
